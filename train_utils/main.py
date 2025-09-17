@@ -27,6 +27,7 @@ def prepare_model(args, model):
     qlayers = quant_utils.find_qlayers(model)
     for name in qlayers:
         if "down_proj" in name:
+            # Add R4 online rotation
             had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
             qlayers[name].online_full_had = True
             qlayers[name].had_K = had_K

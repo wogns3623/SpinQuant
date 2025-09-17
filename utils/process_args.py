@@ -242,7 +242,10 @@ def parser_gen():
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
     parser.add_argument(
-        "--lm_eval", action="store_true", help="Evaluate the model on LM Eval tasks."
+        "--lm_eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Evaluate the model on LM Eval tasks.",
     )
     parser.add_argument(
         "--tasks",

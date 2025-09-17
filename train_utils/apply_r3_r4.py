@@ -76,6 +76,7 @@ class QKRotationWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         q, k = self.func(*args, **kwargs)
         dtype = q.dtype
+        # R3 online rotation
         q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
         k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
         (bsz, num_heads, seq_len, head_dim) = k.shape

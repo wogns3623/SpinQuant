@@ -247,6 +247,7 @@ class ActQuantWrapper(torch.nn.Module):
 
         # Rotate, if needed
         if self.online_full_had:
+            # R4 online rotation
             if self.fp32_had:  # Full Hadamard in FP32
                 x = hadamard_utils.matmul_hadU_cuda(x.float(), self.had_K, self.K).to(
                     x_dtype
