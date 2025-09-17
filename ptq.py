@@ -76,6 +76,33 @@ def train() -> None:
     log.info("wiki2 ppl is: {}".format(dataset_ppl))
     dist.barrier()
 
+    if not ptq_args.lm_eval:
+        return
+
+    # Import lm_eval utils
+    import lm_eval
+    from lm_eval import utils as lm_eval_utils
+    from lm_eval.api.registry import ALL_TASKS
+    from lm_eval.models.huggingface import HFLM
+
+    hflm = HFLM(
+        pretrained=model, tokenizer=tokenizer, batch_size=ptq_args.lm_eval_batch_size
+    )
+
+    task_names = lm_eval_utils.pattern_match(ptq_args.tasks, ALL_TASKS)
+    results = lm_eval.simple_evaluate(
+        hflm, tasks=task_names, batch_size=ptq_args.lm_eval_batch_size
+    )["results"]
+
+    metric_vals = {
+        task: round(result.get("acc_norm,none", result["acc,none"]), 4)
+        for task, result in results.items()
+    }
+    metric_vals["acc_avg"] = round(
+        sum(metric_vals.values()) / len(metric_vals.values()), 4
+    )
+    print("lm_eval metric: ", metric_vals)
+
 
 if __name__ == "__main__":
     train()

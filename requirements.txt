@@ -1,0 +1,6 @@
+transformers==4.44.2
+accelerate==0.34.2
+datasets==2.20.0
+sentencepiece
+tensorboardX
+lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@9b0b15b1ccace3534ffbd13298c569869ce8eaf3

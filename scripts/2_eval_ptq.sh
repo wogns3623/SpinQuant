@@ -7,8 +7,14 @@
 
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
-torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
---input_model $1 \
+input_model=$1
+w_bits=$2
+a_bits=$3
+kv_bits=$4
+save_path=$5
+
+CUDA_VISIBLE_DEVICES=1 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
+--input_model $input_model \
 --do_train False \
 --do_eval True \
 --per_device_eval_batch_size 4 \
@@ -16,10 +22,10 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --fp16 False \
 --bf16 True \
 --save_safetensors False \
---w_bits $2 \
---a_bits $3 \
---k_bits $4 \
---v_bits $4 \
+--w_bits $w_bits \
+--a_bits $a_bits \
+--k_bits $kv_bits \
+--v_bits $kv_bits \
 --w_clip \
 --a_asym \
 --k_asym \
@@ -27,5 +33,5 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --rotate \
---optimized_rotation_path "your_path/R.bin" \
+--optimized_rotation_path "$save_path/R.bin" \
 

@@ -241,8 +241,38 @@ def parser_gen():
     parser.add_argument(
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
+    parser.add_argument(
+        "--lm_eval", action="store_true", help="Evaluate the model on LM Eval tasks."
+    )
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        default=[
+            "piqa",
+            "hellaswag",
+            "arc_easy",
+            "arc_challenge",
+            "winogrande",
+            "lambada",
+        ],
+    )
+    parser.add_argument(
+        "--lm_eval_batch_size",
+        type=int,
+        default=128,
+        help="Batch size for evaluating with lm eval harness.",
+    )
 
     args, unknown = parser.parse_known_args()
+    if args.lm_eval:
+        from lm_eval import tasks
+        from lm_eval import utils as lm_eval_utils
+        from lm_eval.tasks import initialize_tasks
+
+        initialize_tasks()
+        for task in args.tasks:
+            if task not in lm_eval_utils.MultiChoice(tasks.ALL_TASKS):
+                raise ValueError(f"Invalid task: {task}")
 
     # assert (
     #     args.a_groupsize == args.w_groupsize
