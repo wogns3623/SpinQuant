@@ -23,8 +23,7 @@ from utils.data_utils import CustomJsonDataset
 from utils.hadamard_utils import random_hadamard_matrix
 from utils.process_args import process_args_ptq
 from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
-
-log: Logger = get_logger("spinquant")
+from utils import data_utils, eval_utils, utils
 
 
 class RotateModule(nn.Module):
@@ -43,9 +42,17 @@ def train() -> None:
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
     local_rank = get_local_rank()
+    log: Logger = utils.get_logger(
+        "spinquant", dist_rank=local_rank, output_dir=training_args.logging_dir
+    )
 
     log.info("the rank is {}".format(local_rank))
-    torch.distributed.barrier()
+    dist.barrier()
+
+    if ptq_args.debug:
+        ptq_args.optimize_cayley = False
+        ptq_args.optimize_inverse = True
+        ptq_args.optimize_sort_group = True
 
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
@@ -77,6 +84,7 @@ def train() -> None:
             model.config.hidden_size // model.config.num_attention_heads, "cuda"
         )
         model.model.layers[i].self_attn.R2 = RotateModule(R2)
+
     if local_rank == 0:
         log.info("Model init completed for training {}".format(model))
         log.info("Start to load tokenizer...")
@@ -101,38 +109,64 @@ def train() -> None:
         block_size=min(training_args.model_max_length, 2048),
     )
 
-    trainable_parameters = [model.R1.weight] + [
-        model.model.layers[i].self_attn.R2.weight
-        for i in range(model.config.num_hidden_layers)
-    ]
-    model.seqlen = training_args.model_max_length
-    optimizer = SGDG(trainable_parameters, lr=training_args.learning_rate, stiefel=True)
-    MyTrainer = Trainer
-    # Use FSDP for 70B rotation training
-    if training_args.fsdp != "" and training_args.fsdp != []:
-        MyTrainer = FSDPTrainer
+    save_keys = ["R1.weight", "self_attn.R2"]
 
-    trainer = MyTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        args=training_args,
-        train_dataset=train_data,
-        eval_dataset=None,
-        data_collator=default_data_collator,
-        optimizers=(optimizer, None),
-    )
-    torch.distributed.barrier()
+    if ptq_args.optimize_inverse:
+        # find per layer inversion of rotation matrix R1 and R2
+        save_keys += ["r_inv"]
+    if ptq_args.optimize_sort_group:
+        # find per layer best sorting group of rotation matrix R1 and R2
+        save_keys += ["r_perm"]
+    model.set_rotation_adjust(ptq_args.optimize_inverse, ptq_args.optimize_sort_group)
 
-    trainer.train()
-    if training_args.fsdp != "" and training_args.fsdp != []:
-        cpu_state = pt_fsdp_state_dict(trainer.model)
+    if ptq_args.optimize_cayley:
+        trainable_parameters = [model.R1.weight] + [
+            model.model.layers[i].self_attn.R2.weight
+            for i in range(model.config.num_hidden_layers)
+        ]
+        model.seqlen = training_args.model_max_length
+        optimizer = SGDG(
+            trainable_parameters, lr=training_args.learning_rate, stiefel=True
+        )
+        MyTrainer = Trainer
+        # Use FSDP for 70B rotation training
+        if training_args.fsdp != "" and training_args.fsdp != []:
+            MyTrainer = FSDPTrainer
+
+        trainer = MyTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            args=training_args,
+            train_dataset=train_data,
+            eval_dataset=None,
+            data_collator=default_data_collator,
+            optimizers=(optimizer, None),
+        )
+        dist.barrier()
+
+        trainer.train()
+        if training_args.fsdp != "" and training_args.fsdp != []:
+            cpu_state = pt_fsdp_state_dict(trainer.model)
+        else:
+            cpu_state = trainer.model.state_dict()
     else:
-        cpu_state = trainer.model.state_dict()
+        dataloader = data_utils.get_wikitext2(
+            seed=ptq_args.seed,
+            seqlen=2048,
+            tokenizer=tokenizer,
+            eval_mode=True,
+        )
+        dataloader.input_ids = dataloader.input_ids[:, :4096]
+
+        model.seqlen = training_args.model_max_length
+        ptq_args.bsz = 1
+        eval_utils.evaluator(model, dataloader, utils.DEV, ptq_args)
+        cpu_state = model.state_dict()
 
     R_dict = {
         key.replace(".weight", ""): value
         for key, value in cpu_state.items()
-        if "R1.weight" in key or "self_attn.R2" in key
+        if any(matcher in key and value is not None for matcher in save_keys)
     }
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)

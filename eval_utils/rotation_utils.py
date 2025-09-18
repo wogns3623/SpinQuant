@@ -14,7 +14,7 @@ import math
 import torch
 import tqdm
 
-from utils import monkeypatch, quant_utils, utils
+from utils import monkeypatch, quant_utils, utils, adjust_utils
 from utils.hadamard_utils import (
     apply_exact_had_to_linear,
     is_pow2,
@@ -50,6 +50,18 @@ def get_orthogonal_matrix(size, mode, device="cuda"):
         return random_hadamard_matrix(size, device)
     else:
         raise ValueError(f"Unknown mode {mode}")
+
+
+def adjust_rotation(R, rotations, key_prefix):
+    inv = None
+    if f"model.layers.{key_prefix}r_inv" in rotations:
+        inv = rotations[f"{key_prefix}r_inv"].to(R)
+
+    perm = None
+    if f"model.layers.{key_prefix}r_perm" in rotations:
+        perm = rotations[f"{key_prefix}r_perm"]
+
+    return adjust_utils.adjust_rotation(R, inv, perm)
 
 
 def rotate_embeddings(model, R1: torch.Tensor) -> None:
@@ -121,30 +133,52 @@ def rotate_ov_proj(layer, head_num, head_dim, R2=None):
 
 @torch.inference_mode()
 def rotate_model(model, args):
-    R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
+    rotations = None
     if args.optimized_rotation_path is not None:
-        R_cpk = args.optimized_rotation_path
-        R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+        rotations = torch.load(args.optimized_rotation_path)
+
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
 
-    rotate_embeddings(model, R1)
-    rotate_head(model, R1)
+    if rotations is not None:
+        R1 = rotations["R1"].cuda().to(torch.float64)
+    else:
+        R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
+
+    rotate_embeddings(model, adjust_rotation(R1, rotations, "0.in_"))
+    rotate_head(model, adjust_rotation(R1, rotations, "31.mlp.out_"))
     utils.cleanup_memory()
     layers = [layer for layer in model.model.layers]
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
+        rotate_attention_inputs(
+            layers[idx],
+            adjust_rotation(R1, rotations, f"{idx}.in_"),
+        )
+        rotate_attention_output(
+            layers[idx],
+            adjust_rotation(R1, rotations, f"{idx}.self_attn.out_"),
+        )
+        rotate_mlp_input(
+            layers[idx],
+            adjust_rotation(R1, rotations, f"{idx}.self_attn.out_"),
+        )
+        rotate_mlp_output(
+            layers[idx],
+            adjust_rotation(R1, rotations, f"{idx}.mlp.out_"),
+        )
+
         if args.optimized_rotation_path is not None:
-            key = f"model.layers.{idx}.self_attn.R2"
-            R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
+            R2 = rotations[f"model.layers.{idx}.self_attn.R2"].cuda().to(torch.float64)
         else:
             R2 = get_orthogonal_matrix(head_dim, args.rotate_mode)
-        rotate_attention_inputs(layers[idx], R1)
-        rotate_attention_output(layers[idx], R1)
-        rotate_mlp_input(layers[idx], R1)
-        rotate_mlp_output(layers[idx], R1)
-        rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
+        rotate_ov_proj(
+            layers[idx],
+            num_heads,
+            head_dim,
+            R2=adjust_rotation(R2, rotations, f"{idx}.self_attn.ov_"),
+        )
 
 
 class QKRotationWrapper(torch.nn.Module):

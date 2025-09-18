@@ -232,6 +232,7 @@ class LlamaRotaryEmbedding(nn.Module):
             if isinstance(device_type, str) and device_type != "mps"
             else "cpu"
         )
+        inv_freq_expanded = inv_freq_expanded.to(device_type)
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (
                 inv_freq_expanded.float() @ position_ids_expanded.float()

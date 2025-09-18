@@ -51,6 +51,7 @@ from transformers.utils import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from train_utils.quant_linear import QuantizeLinear
+from utils.adjust_utils import adjust_rotation, find_adjust_matrices
 
 
 logger = logging.get_logger(__name__)
@@ -234,6 +235,7 @@ class LlamaRotaryEmbedding(nn.Module):
             if isinstance(device_type, str) and device_type != "mps"
             else "cpu"
         )
+        inv_freq_expanded = inv_freq_expanded.to(device_type)
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (
                 inv_freq_expanded.float() @ position_ids_expanded.float()
@@ -325,7 +327,13 @@ class LlamaMLP(nn.Module):
         )
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x, R1):
+        self.use_rotate_inverse = False
+        self.use_rotate_permutation = False
+
+        self.out_r_inv = None
+        self.out_r_perm = None
+
+    def forward(self, x, R1=None, in_r_inv=None, in_r_perm=None):
         # if self.config.pretraining_tp > 1:
         #     slice = self.intermediate_size // self.config.pretraining_tp
         #     gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
@@ -343,13 +351,31 @@ class LlamaMLP(nn.Module):
         #     ]
         #     down_proj = sum(down_proj)
         # else:
+        R1_adjusted = adjust_rotation(R1, in_r_inv, in_r_perm)
+
         down_proj = self.down_proj(
-            self.act_fn(self.gate_proj(x, R1)) * self.up_proj(x, R1),
-            R1,
+            self.act_fn(self.gate_proj(x, R1_adjusted)) * self.up_proj(x, R1_adjusted),
+            adjust_rotation(R1, self.out_r_inv, self.out_r_perm),
             transpose=True,
         )
 
+        if R1 is not None and (self.use_rotate_inverse or self.use_rotate_permutation):
+            if self.out_r_inv is None and self.out_r_perm is None:
+                self.out_r_inv, self.out_r_perm = find_adjust_matrices(
+                    down_proj,
+                    R1,
+                    self.use_rotate_inverse,
+                    self.use_rotate_permutation,
+                )
+                down_proj = adjust_rotation(down_proj, self.out_r_inv, self.out_r_perm)
+
         return down_proj
+
+    def set_rotation_adjust(
+        self, use_rotate_inverse: bool, use_rotate_permutation: bool
+    ):
+        self.use_rotate_inverse = use_rotate_inverse
+        self.use_rotate_permutation = use_rotate_permutation
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -408,6 +434,15 @@ class LlamaAttention(nn.Module):
         )
         self.R2 = None
 
+        self.use_rotate_inverse = False
+        self.use_rotate_permutation = False
+
+        self.ov_r_inv = None
+        self.ov_r_perm = None
+
+        self.out_r_inv = None
+        self.out_r_perm = None
+
         # TODO (joao): remove in v4.46 (RoPE is computed in the model, not in the decoder layers)
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
@@ -424,6 +459,8 @@ class LlamaAttention(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        in_r_inv=None,
+        in_r_perm=None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -457,9 +494,36 @@ class LlamaAttention(nn.Module):
         #     value_states = torch.cat(value_states, dim=-1)
 
         # else:
-        query_states = self.q_proj(hidden_states, R1)
-        key_states = self.k_proj(hidden_states, R1)
-        value_states = self.v_proj(hidden_states, R1, R2=self.R2.weight)
+        R1_adjusted = adjust_rotation(R1, in_r_inv, in_r_perm)
+        R2_adjusted = (
+            adjust_rotation(self.R2.weight, self.ov_r_inv, self.ov_r_perm)
+            if self.R2 is not None
+            else None
+        )
+        query_states = self.q_proj(hidden_states, R1_adjusted)
+        key_states = self.k_proj(hidden_states, R1_adjusted)
+        value_states = self.v_proj(
+            hidden_states,
+            R1_adjusted,
+            R2=R2_adjusted,
+        )
+
+        if self.R2 is not None and (
+            self.use_rotate_inverse or self.use_rotate_permutation
+        ):
+            if self.ov_r_inv is None and self.ov_r_perm is None:
+                self.ov_r_inv, self.ov_r_perm = find_adjust_matrices(
+                    value_states,
+                    self.R2.weight,
+                    self.use_rotate_inverse,
+                    self.use_rotate_permutation,
+                )
+                value_states = adjust_rotation(
+                    value_states, self.ov_r_inv, self.ov_r_perm
+                )
+                R2_adjusted = adjust_rotation(
+                    self.R2.weight, self.ov_r_inv, self.ov_r_perm
+                )
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -535,12 +599,35 @@ class LlamaAttention(nn.Module):
         #         ]
         #     )
         # else:
-        attn_output = self.o_proj(attn_output, R1, R2=self.R2.weight, transpose=True)
+        attn_output = self.o_proj(
+            attn_output,
+            adjust_rotation(R1, self.out_r_inv, self.out_r_perm),
+            R2=R2_adjusted,
+            transpose=True,
+        )
+
+        if R1 is not None and (self.use_rotate_inverse or self.use_rotate_permutation):
+            if self.out_r_inv is None and self.out_r_perm is None:
+                self.out_r_inv, self.out_r_perm = find_adjust_matrices(
+                    attn_output,
+                    R1,
+                    self.use_rotate_inverse,
+                    self.use_rotate_permutation,
+                )
+                attn_output = adjust_rotation(
+                    attn_output, self.out_r_inv, self.out_r_perm
+                )
 
         if not output_attentions:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+    def set_rotation_adjust(
+        self, use_rotate_inverse: bool, use_rotate_permutation: bool
+    ):
+        self.use_rotate_inverse = use_rotate_inverse
+        self.use_rotate_permutation = use_rotate_permutation
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -788,7 +875,7 @@ class LlamaSdpaAttention(LlamaAttention):
         return attn_output, None, past_key_value
 
 
-LLAMA_ATTENTION_CLASSES = {
+LLAMA_ATTENTION_CLASSES: dict[str, type[LlamaAttention]] = {
     "eager": LlamaAttention,
     "flash_attention_2": LlamaFlashAttention2,
     "sdpa": LlamaSdpaAttention,
@@ -823,6 +910,8 @@ class LlamaDecoderLayer(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        in_r_inv=None,
+        in_r_perm=None,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -864,14 +953,23 @@ class LlamaDecoderLayer(nn.Module):
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             R1=R1,
+            in_r_inv=in_r_inv,
+            in_r_perm=in_r_perm,
             **kwargs,
         )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
+
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, R1=R1)
+        hidden_states = self.mlp(
+            hidden_states,
+            R1=R1,
+            in_r_inv=self.self_attn.out_r_inv,
+            in_r_perm=self.self_attn.out_r_perm,
+        )
+
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -883,6 +981,12 @@ class LlamaDecoderLayer(nn.Module):
             outputs += (present_key_value,)
 
         return outputs
+
+    def set_rotation_adjust(
+        self, use_rotate_inverse: bool, use_rotate_permutation: bool
+    ):
+        self.self_attn.set_rotation_adjust(use_rotate_inverse, use_rotate_permutation)
+        self.mlp.set_rotation_adjust(use_rotate_inverse, use_rotate_permutation)
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -1035,6 +1139,12 @@ class LlamaModel(LlamaPreTrainedModel):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
+        self.use_rotate_inverse = False
+        self.use_rotate_permutation = False
+
+        self.in_r_inv = None
+        self.in_r_perm = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1089,9 +1199,24 @@ class LlamaModel(LlamaPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
         if R1 is not None:
             dtype = inputs_embeds.dtype
-            inputs_embeds = (inputs_embeds.to(torch.float64) @ R1.to(torch.float64)).to(
-                dtype
-            )
+            inputs_embeds = (
+                inputs_embeds.to(torch.float64)
+                @ adjust_rotation(R1, self.in_r_inv, self.in_r_perm).to(torch.float64)
+            ).to(dtype)
+
+            if R1 is not None and (
+                self.use_rotate_inverse or self.use_rotate_permutation
+            ):
+                if self.in_r_inv is None or self.in_r_perm is None:
+                    self.in_r_inv, self.in_r_perm = find_adjust_matrices(
+                        inputs_embeds,
+                        R1,
+                        self.use_rotate_inverse,
+                        self.use_rotate_permutation,
+                    )
+                    inputs_embeds = adjust_rotation(
+                        inputs_embeds, self.in_r_inv, self.in_r_perm
+                    )
 
         return_legacy_cache = False
         if (
@@ -1133,6 +1258,7 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
+        in_r_inv, in_r_perm = self.in_r_inv, self.in_r_perm
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1149,6 +1275,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     cache_position,
                     position_embeddings,
                     R1,
+                    in_r_inv,
+                    in_r_perm,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1161,7 +1289,14 @@ class LlamaModel(LlamaPreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     R1=R1,
+                    in_r_inv=in_r_inv,
+                    in_r_perm=in_r_perm,
                 )
+
+            in_r_inv, in_r_perm = (
+                decoder_layer.mlp.out_r_inv,
+                decoder_layer.mlp.out_r_perm,
+            )
 
             hidden_states = layer_outputs[0]
 
@@ -1267,6 +1402,18 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
         return causal_mask
+
+    def get_out_adjust_matrices(self):
+        last_module = self.layers[-1].mlp
+        return last_module.out_r_inv, last_module.out_r_perm
+
+    def set_rotation_adjust(
+        self, use_rotate_inverse: bool, use_rotate_permutation: bool
+    ):
+        self.use_rotate_inverse = use_rotate_inverse
+        self.use_rotate_permutation = use_rotate_permutation
+        for layer in self.layers:
+            layer.set_rotation_adjust(use_rotate_inverse, use_rotate_permutation)
 
 
 class LlamaForCausalLM(LlamaPreTrainedModel):
@@ -1381,7 +1528,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         if self.R1 is not None:
             dtype = hidden_states.dtype
             hidden_states = (
-                hidden_states.to(torch.float64) @ self.R1.weight.T.to(torch.float64)
+                hidden_states.to(torch.float64)
+                @ adjust_rotation(
+                    self.R1.weight, *self.model.get_out_adjust_matrices()
+                ).T.to(torch.float64)
             ).to(dtype)
 
         if self.config.pretraining_tp > 1:
@@ -1507,6 +1657,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             }
         )
         return model_inputs
+
+    def set_rotation_adjust(
+        self, use_rotate_inverse: bool, use_rotate_permutation: bool
+    ):
+        self.model.set_rotation_adjust(use_rotate_inverse, use_rotate_permutation)
 
 
 @add_start_docstrings(

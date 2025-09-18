@@ -17,16 +17,17 @@ from eval_utils.modeling_llama import LlamaForCausalLM
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
 
-log: Logger = utils.get_logger("spinquant")
-
 
 def train() -> None:
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
     local_rank = utils.get_local_rank()
+    log: Logger = utils.get_logger(
+        "spinquant", dist_rank=local_rank, output_dir=training_args.logging_dir
+    )
 
     log.info("the rank is {}".format(local_rank))
-    torch.distributed.barrier()
+    dist.barrier()
 
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
@@ -85,6 +86,7 @@ def train() -> None:
     from lm_eval.api.registry import ALL_TASKS
     from lm_eval.models.huggingface import HFLM
 
+    model = model.cuda()
     hflm = HFLM(
         pretrained=model, tokenizer=tokenizer, batch_size=ptq_args.lm_eval_batch_size
     )
@@ -101,7 +103,7 @@ def train() -> None:
     metric_vals["acc_avg"] = round(
         sum(metric_vals.values()) / len(metric_vals.values()), 4
     )
-    print("lm_eval metric: ", metric_vals)
+    log.info("lm_eval metric: ", metric_vals)
 
 
 if __name__ == "__main__":

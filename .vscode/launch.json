@@ -1,0 +1,49 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "working",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/.conda/bin/torchrun",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--nnodes=1", "--nproc_per_node=1",
+        "optimize_rotation.py",
+        "--input_model", "meta-llama/Llama-2-7b-hf",
+        "--output_rotation_path", "./logs/test",
+        "--output_dir", "./logs/test",
+        "--logging_dir", "./logs/test",
+        "--model_max_length", "2048",
+        "--fp16", "False",
+        "--bf16", "True",
+        "--log_on_each_node", "False",
+        "--per_device_train_batch_size", "1",
+        "--logging_steps", "1",
+        "--learning_rate", "1.5",
+        "--weight_decay", "0.",
+        "--lr_scheduler_type", "cosine",
+        "--gradient_checkpointing", "True",
+        "--save_safetensors", "False",
+        "--max_steps", "100",
+        "--w_bits", "4",
+        "--a_bits", "4",
+        "--k_bits", "4",
+        "--v_bits", "4",
+        "--w_clip",
+        "--a_asym",
+        "--k_asym",
+        "--v_asym",
+        "--k_groupsize", "128",
+        "--v_groupsize", "128",
+        "--debug",
+        // "${command:pickArgs}"
+      ]
+    },
+  ]
+}

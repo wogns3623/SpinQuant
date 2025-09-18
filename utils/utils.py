@@ -11,6 +11,7 @@
 import logging
 import os
 import random
+import time
 from typing import Optional
 
 import numpy as np
@@ -128,7 +129,9 @@ def cleanup_memory(verbos=True) -> None:
 
 
 # Define a utility method for setting the logging parameters of a logger
-def get_logger(logger_name: Optional[str]) -> logging.Logger:
+def get_logger(
+    logger_name: Optional[str], *, dist_rank=0, output_dir=None
+) -> logging.Logger:
     # Get the logger with the specified name
     logger = logging.getLogger(logger_name)
 
@@ -141,11 +144,21 @@ def get_logger(logger_name: Optional[str]) -> logging.Logger:
     )
 
     # Create a console handler for outputting log messages to the console
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    if dist_rank == 0:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
-    # Add the console handler to the logger
-    logger.addHandler(console_handler)
+    # create file handlers
+    if output_dir is not None:
+        file_handler = logging.FileHandler(
+            os.path.join(output_dir, f"log_rank{dist_rank}_{int(time.time())}.txt"),
+            mode="a",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 

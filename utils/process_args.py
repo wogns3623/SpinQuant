@@ -75,6 +75,24 @@ def parser_gen():
         default=False,
         help="Apply Hadamard rotation in FP32 (default: False)",
     )
+    parser.add_argument(
+        "--optimize_cayley",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Optimize the rotation matrices with Cayley SGD",
+    )
+    parser.add_argument(
+        "--optimize_inverse",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Optimize the rotation matrices with channel inversion",
+    )
+    parser.add_argument(
+        "--optimize_sort_group",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Optimize the rotation matrices with grouped sorting",
+    )
 
     # Activation Quantization Arguments
     parser.add_argument(
@@ -242,6 +260,14 @@ def parser_gen():
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
     parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="debug flag",
+    )
+
+    # Task evaluation arguments
+    parser.add_argument(
         "--lm_eval",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -252,11 +278,12 @@ def parser_gen():
         nargs="+",
         default=[
             "piqa",
-            "hellaswag",
             "arc_easy",
             "arc_challenge",
+            "boolq",
+            "hellaswag",
             "winogrande",
-            "lambada",
+            # "lambada",
         ],
     )
     parser.add_argument(
