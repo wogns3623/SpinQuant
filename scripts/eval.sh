@@ -37,7 +37,7 @@ done
 
 torchrun --nnodes=1 --nproc_per_node=1 --master_port=$master_port ptq.py \
   --input_model $input_model \
-  --optimized_rotation_path "$save_path/R.bin" \
+  --optimized_rotation_path "$output_dir/R.bin" \
   --logging_dir $output_dir \
   --do_train False \
   --do_eval True \
